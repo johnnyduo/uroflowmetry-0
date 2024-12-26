@@ -109,19 +109,53 @@ def process_audio_file(uploaded_file):
         return None
 
 def create_uroflow_graph(time, flow_rate, parameters):
-    """Create uroflowmetry graph with parameters"""
+    """Create uroflowmetry graph with gradient effect"""
     try:
         fig, ax = plt.subplots(figsize=(12, 8))
         
         # Create gradient effect
         gradient_cmap = create_custom_gradient()
+        
+        # Create line segments
         points = np.array([time, flow_rate]).T.reshape(-1, 1, 2)
         segments = np.concatenate([points[:-1], points[1:]], axis=1)
         
-        # Plot with gradient
-        lc = plt.collections.LineCollection(segments, cmap=gradient_cmap)
+        # Create LineCollection
+        lc = LineCollection(segments, cmap=gradient_cmap)
         lc.set_array(np.linspace(0, 1, len(time)))
+        
+        # Add collection to axis
         ax.add_collection(lc)
+        
+        # Set plot limits and labels
+        ax.set_xlim(min(time), max(time))
+        ax.set_ylim(0, max(flow_rate) * 1.2)
+        ax.set_xlabel('Time (s)', fontsize=12)
+        ax.set_ylabel('Flow Rate (ml/s)', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.set_title('Sound-Based Uroflowmetry Graph', fontsize=14, pad=20)
+        
+        # Add parameters box
+        param_text = '\n'.join([f"{k}: {v}" for k, v in parameters.items()])
+        plt.text(1.02, 0.98, param_text,
+                transform=ax.transAxes,
+                bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'),
+                verticalalignment='top',
+                fontsize=10)
+        
+        plt.tight_layout()
+        return fig
+    except Exception as e:
+        st.error(f"Error creating graph: {str(e)}")
+        return None
+
+def create_uroflow_graph_simple(time, flow_rate, parameters):
+    """Create uroflowmetry graph (simplified version)"""
+    try:
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Simple line plot
+        ax.plot(time, flow_rate, color='#1f77b4', linewidth=2, label='Flow Rate')
         
         # Set plot limits and labels
         ax.set_xlim(min(time), max(time))
@@ -239,8 +273,12 @@ def main():
                     tab1, tab2 = st.tabs(["📈 Graph", "📊 Parameters"])
                     
                     with tab1:
-                        # Create and display graph
-                        fig = create_uroflow_graph(time, flow_rate, parameters)
+                        # Create and display graph (try both versions)
+                        try:
+                            fig = create_uroflow_graph(time, flow_rate, parameters)
+                        except:
+                            fig = create_uroflow_graph_simple(time, flow_rate, parameters)
+                            
                         if fig:
                             st.pyplot(fig)
                             
