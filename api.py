@@ -1,7 +1,6 @@
 # api.py
 
 import os
-import librosa
 import numpy as np
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
@@ -11,10 +10,15 @@ from scipy.signal import savgol_filter, butter, filtfilt
 import io
 from pydantic import BaseModel
 from typing import List, Dict
+import soundfile as sf
+
+# Disable Numba warnings and JIT
+os.environ['NUMBA_DISABLE_JIT'] = '1'
+import warnings
+warnings.filterwarnings('ignore')
 
 app = FastAPI(title="Uroflowmetry API")
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,28 +32,57 @@ class PredictionResponse(BaseModel):
     parameters: Dict[str, str]
     time: List[float]
 
+def calculate_rms(signal, frame_length, hop_length):
+    """Calculate RMS without using librosa/numba"""
+    # Pad the signal
+    pad_length = frame_length - 1
+    padded_signal = np.pad(signal, (pad_length // 2, pad_length - pad_length // 2))
+    
+    # Calculate frames
+    n_frames = 1 + (len(signal) - frame_length) // hop_length
+    frames = np.zeros((n_frames, frame_length))
+    
+    for i in range(n_frames):
+        start = i * hop_length
+        frames[i] = padded_signal[start:start + frame_length]
+    
+    # Calculate RMS
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    return rms
+
 def process_audio(audio_bytes):
     """Process audio file and extract features"""
     try:
-        # Load audio from bytes
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None)
+        # Load audio using soundfile instead of librosa
+        with io.BytesIO(audio_bytes) as audio_io:
+            y, sr = sf.read(audio_io)
+            
+            # Convert to mono if stereo
+            if len(y.shape) > 1:
+                y = np.mean(y, axis=1)
         
         # Ensure we have audio data
         if len(y) == 0:
             raise ValueError("No audio data found")
         
-        # Calculate RMS energy
+        # Calculate frame parameters
         frame_length = int(sr * 0.1)  # 100ms frames
         hop_length = int(frame_length / 2)
-        rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+        
+        # Calculate RMS using our custom function
+        rms = calculate_rms(y, frame_length, hop_length)
         
         # Ensure we have RMS values
         if len(rms) == 0:
             raise ValueError("No RMS values calculated")
         
         # Smooth the RMS curve
-        if len(rms) > 3:  # Ensure enough points for smoothing
-            rms_smoothed = savgol_filter(rms, min(15, len(rms)-2 if len(rms) % 2 == 0 else len(rms)-1), 3)
+        if len(rms) > 3:
+            window_length = min(15, len(rms)-2 if len(rms) % 2 == 0 else len(rms)-1)
+            if window_length > 2:
+                rms_smoothed = savgol_filter(rms, window_length, 3)
+            else:
+                rms_smoothed = rms
         else:
             rms_smoothed = rms
             
@@ -75,7 +108,6 @@ def calculate_parameters(time, flow_rate):
         voided_volume = float(np.trapz(flow_rate, time))
         time_to_max = float(time[np.argmax(flow_rate)])
         
-        # Calculate flow at 2 seconds
         idx_2s = np.where(time >= 2.0)[0]
         flow_at_2s = float(flow_rate[idx_2s[0]]) if len(idx_2s) > 0 else 0.0
         acceleration = flow_at_2s / 2.0 if flow_at_2s > 0 else 0.0
@@ -95,21 +127,17 @@ def calculate_parameters(time, flow_rate):
 @app.post("/predict/", response_model=PredictionResponse)
 async def predict(file: UploadFile = File(...)):
     try:
-        # Read file content
         contents = await file.read()
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file")
         
-        # Process audio and get flow rate
         flow_rate, time = process_audio(contents)
         
         if len(flow_rate) == 0 or len(time) == 0:
             raise HTTPException(status_code=500, detail="No data generated from audio processing")
         
-        # Calculate parameters
         parameters = calculate_parameters(time, flow_rate)
         
-        # Convert numpy arrays to lists and ensure all values are Python native types
         return PredictionResponse(
             flow_rate=flow_rate.tolist(),
             parameters=parameters,
