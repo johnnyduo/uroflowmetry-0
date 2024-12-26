@@ -4,6 +4,7 @@ import streamlit as st
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap
 import json
 import io
