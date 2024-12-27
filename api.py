@@ -31,6 +31,9 @@ class PredictionResponse(BaseModel):
 def calculate_rms(signal, frame_length, hop_length):
     """Calculate RMS manually without using librosa"""
     try:
+        # Handle NaN and Inf values
+        signal = np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0)
+        
         # Pad the signal
         pad_length = frame_length - 1
         padded_signal = np.pad(signal, (pad_length // 2, pad_length - pad_length // 2))
@@ -43,8 +46,12 @@ def calculate_rms(signal, frame_length, hop_length):
             start = i * hop_length
             frames[i] = padded_signal[start:start + frame_length]
         
-        # Calculate RMS
-        rms = np.sqrt(np.mean(frames ** 2, axis=1))
+        # Calculate RMS with small epsilon to avoid division by zero
+        rms = np.sqrt(np.mean(frames ** 2 + 1e-10, axis=1))
+        
+        # Handle any remaining NaN or Inf values
+        rms = np.nan_to_num(rms, nan=0.0, posinf=0.0, neginf=0.0)
+        
         return rms
     except Exception as e:
         raise ValueError(f"RMS calculation failed: {str(e)}")
@@ -52,11 +59,19 @@ def calculate_rms(signal, frame_length, hop_length):
 def apply_bandpass_filter(signal, sr, lowcut=20, highcut=2000):
     """Apply bandpass filter to the audio signal"""
     try:
+        # Handle NaN and Inf values
+        signal = np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0)
+        
         nyquist = sr / 2
         low = lowcut / nyquist
         high = highcut / nyquist
         b, a = butter(4, [low, high], btype='band')
-        return filtfilt(b, a, signal)
+        filtered = filtfilt(b, a, signal)
+        
+        # Handle any remaining NaN or Inf values
+        filtered = np.nan_to_num(filtered, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        return filtered
     except Exception as e:
         raise ValueError(f"Bandpass filter failed: {str(e)}")
 
@@ -74,6 +89,9 @@ def process_audio(audio_bytes):
         # Ensure we have audio data
         if len(y) == 0:
             raise ValueError("No audio data found")
+            
+        # Handle NaN and Inf values
+        y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Apply bandpass filter
         y_filtered = apply_bandpass_filter(y, sr)
@@ -99,6 +117,12 @@ def process_audio(audio_bytes):
         else:
             rms_smoothed = rms
             
+        # Handle NaN and Inf values in smoothed data
+        rms_smoothed = np.nan_to_num(rms_smoothed, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Add small epsilon to avoid division by zero
+        rms_smoothed = rms_smoothed + 1e-10
+        
         # Scale to realistic flow rate values (0-50 ml/s)
         scaler = MinMaxScaler(feature_range=(0, 50))
         flow_rate = scaler.fit_transform(rms_smoothed.reshape(-1, 1)).flatten()
@@ -107,6 +131,14 @@ def process_audio(audio_bytes):
         duration = len(y) / sr
         time = np.linspace(0, duration, len(flow_rate))
         
+        # Final check for any remaining NaN/Inf values
+        flow_rate = np.nan_to_num(flow_rate, nan=0.0, posinf=50.0, neginf=0.0)
+        time = np.nan_to_num(time, nan=0.0, posinf=duration, neginf=0.0)
+        
+        # Ensure all values are finite
+        if not np.all(np.isfinite(flow_rate)) or not np.all(np.isfinite(time)):
+            raise ValueError("Invalid values in processed data")
+            
         return flow_rate, time
         
     except Exception as e:
@@ -115,6 +147,10 @@ def process_audio(audio_bytes):
 def calculate_parameters(time, flow_rate):
     """Calculate uroflowmetry parameters"""
     try:
+        # Handle any potential NaN/Inf values
+        flow_rate = np.nan_to_num(flow_rate, nan=0.0, posinf=50.0, neginf=0.0)
+        time = np.nan_to_num(time, nan=0.0)
+        
         max_flow = float(np.max(flow_rate))
         avg_flow = float(np.mean(flow_rate))
         voiding_duration = float(time[-1])
@@ -126,7 +162,13 @@ def calculate_parameters(time, flow_rate):
         flow_at_2s = float(flow_rate[idx_2s[0]]) if len(idx_2s) > 0 else 0.0
         acceleration = flow_at_2s / 2.0 if flow_at_2s > 0 else 0.0
         
-        return {
+        # Ensure all values are finite and within reasonable ranges
+        max_flow = min(max_flow, 50.0)
+        avg_flow = min(avg_flow, 50.0)
+        voiding_duration = min(voiding_duration, 300.0)  # Max 5 minutes
+        voided_volume = min(voided_volume, 1000.0)  # Max 1000 ml
+        
+        parameters = {
             "Maximum Flow Rate": f"{max_flow:.2f} ml/s",
             "Average Flow Rate": f"{avg_flow:.2f} ml/s",
             "Voiding Duration": f"{voiding_duration:.2f} s",
@@ -135,6 +177,14 @@ def calculate_parameters(time, flow_rate):
             "Flow at 2 Seconds": f"{flow_at_2s:.2f} ml/s",
             "Acceleration": f"{acceleration:.2f} ml/s²"
         }
+        
+        # Validate all values are JSON serializable
+        for key, value in parameters.items():
+            if not isinstance(value, (str, int, float)):
+                parameters[key] = str(value)
+                
+        return parameters
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Parameter calculation failed: {str(e)}")
 
@@ -154,13 +204,17 @@ async def predict(file: UploadFile = File(...)):
         # Process audio and get flow rate
         flow_rate, time = process_audio(contents)
         
+        # Ensure arrays are finite and JSON serializable
+        flow_rate = np.nan_to_num(flow_rate, nan=0.0, posinf=50.0, neginf=0.0)
+        time = np.nan_to_num(time, nan=0.0)
+        
         if len(flow_rate) == 0 or len(time) == 0:
             raise HTTPException(status_code=500, detail="No data generated from audio processing")
         
         # Calculate parameters
         parameters = calculate_parameters(time, flow_rate)
         
-        # Return response
+        # Convert numpy arrays to lists and ensure all values are finite
         return PredictionResponse(
             flow_rate=flow_rate.tolist(),
             parameters=parameters,
