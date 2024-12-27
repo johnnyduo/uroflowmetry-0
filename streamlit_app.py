@@ -1,5 +1,6 @@
 # app.py
 
+import os
 import streamlit as st
 import requests
 import numpy as np
@@ -9,8 +10,14 @@ from matplotlib.colors import LinearSegmentedColormap
 import io
 from datetime import datetime
 
-# Configuration
-API_URL = st.secrets["api_url"]
+# Configuration with fallback
+try:
+    API_URL = st.secrets["api_url"]
+except KeyError:
+    API_URL = "https://uroflowmetry-api.onrender.com"  # Replace with your actual Render URL
+    if not st.session_state.get("api_warning_shown"):
+        st.warning("⚠️ Using default API URL. For production, please set up secrets in Streamlit Cloud.")
+        st.session_state.api_warning_shown = True
 
 def create_custom_gradient():
     """Create custom gradient colormap for the graph"""
@@ -101,6 +108,8 @@ def process_audio_file(uploaded_file):
             
     except requests.exceptions.ConnectionError:
         st.error("Could not connect to the API. Please check if the API is available.")
+        if st.button("Show API URL"):
+            st.code(API_URL)
         return None
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
@@ -114,29 +123,60 @@ def check_api_health():
     except:
         return False
 
+def validate_audio_file(file):
+    """Validate the uploaded audio file"""
+    if file is None:
+        return False, "No file uploaded"
+        
+    # Check file size (10MB limit)
+    if file.size > 10 * 1024 * 1024:
+        return False, "File size too large (max 10MB)"
+        
+    # Check file extension
+    if not file.name.lower().endswith(('.wav', '.mp3')):
+        return False, "Invalid file format (only WAV or MP3)"
+        
+    return True, ""
+
 def main():
+    # Page configuration
     st.set_page_config(
         page_title="Uroflowmetry Analysis",
         page_icon="🌊",
         layout="wide"
     )
     
+    # Title and description
     st.title("Sound-Based Uroflowmetry Analysis")
     st.write("Upload an audio file to generate uroflowmetry graph")
+    
+    # Debug information in development
+    if st.secrets.get("dev_mode"):
+        with st.expander("🔧 Debug Information"):
+            st.write("API URL:", API_URL)
+            st.write("API Health:", "✅ Online" if check_api_health() else "❌ Offline")
     
     # Check API health
     if not check_api_health():
         st.error("⚠️ API service is not available. Please try again later.")
+        if st.button("Retry Connection"):
+            st.experimental_rerun()
         return
     
     # File uploader
     uploaded_file = st.file_uploader(
         "Choose an audio file",
         type=['wav', 'mp3'],
-        help="Upload a WAV or MP3 file of urination sound"
+        help="Upload a WAV or MP3 file of urination sound (max 10MB)"
     )
     
     if uploaded_file is not None:
+        # Validate file
+        is_valid, error_message = validate_audio_file(uploaded_file)
+        if not is_valid:
+            st.error(error_message)
+            return
+            
         try:
             # Show processing status
             with st.spinner("Processing audio file..."):
@@ -177,6 +217,8 @@ def main():
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
             st.write("Please try with a different audio file")
+            if st.secrets.get("dev_mode"):
+                st.exception(e)
 
 if __name__ == "__main__":
     main()
