@@ -1,13 +1,12 @@
-numpy==1.23.5
-numba==0.56.4
-librosa==0.8.1
+# requirements.txt
+numpy>=1.24.3
+scipy>=1.10.1
 streamlit==1.41.1
 matplotlib==3.10.0
-scipy==1.10.1
 scikit-learn==1.6.0
 requests==2.32.3
 python-multipart==0.0.6
 fastapi==0.104.1
 uvicorn==0.24.0
-audioread==3.0.1
 soundfile==0.12.1
+audioread==3.0.1
