@@ -12,13 +12,9 @@ from pydantic import BaseModel
 from typing import List, Dict
 import soundfile as sf
 
-# Disable Numba warnings and JIT
-os.environ['NUMBA_DISABLE_JIT'] = '1'
-import warnings
-warnings.filterwarnings('ignore')
-
 app = FastAPI(title="Uroflowmetry API")
 
+# CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,27 +29,41 @@ class PredictionResponse(BaseModel):
     time: List[float]
 
 def calculate_rms(signal, frame_length, hop_length):
-    """Calculate RMS without using librosa/numba"""
-    # Pad the signal
-    pad_length = frame_length - 1
-    padded_signal = np.pad(signal, (pad_length // 2, pad_length - pad_length // 2))
-    
-    # Calculate frames
-    n_frames = 1 + (len(signal) - frame_length) // hop_length
-    frames = np.zeros((n_frames, frame_length))
-    
-    for i in range(n_frames):
-        start = i * hop_length
-        frames[i] = padded_signal[start:start + frame_length]
-    
-    # Calculate RMS
-    rms = np.sqrt(np.mean(frames ** 2, axis=1))
-    return rms
+    """Calculate RMS manually without using librosa"""
+    try:
+        # Pad the signal
+        pad_length = frame_length - 1
+        padded_signal = np.pad(signal, (pad_length // 2, pad_length - pad_length // 2))
+        
+        # Calculate frames
+        n_frames = 1 + (len(signal) - frame_length) // hop_length
+        frames = np.zeros((n_frames, frame_length))
+        
+        for i in range(n_frames):
+            start = i * hop_length
+            frames[i] = padded_signal[start:start + frame_length]
+        
+        # Calculate RMS
+        rms = np.sqrt(np.mean(frames ** 2, axis=1))
+        return rms
+    except Exception as e:
+        raise ValueError(f"RMS calculation failed: {str(e)}")
+
+def apply_bandpass_filter(signal, sr, lowcut=20, highcut=2000):
+    """Apply bandpass filter to the audio signal"""
+    try:
+        nyquist = sr / 2
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        b, a = butter(4, [low, high], btype='band')
+        return filtfilt(b, a, signal)
+    except Exception as e:
+        raise ValueError(f"Bandpass filter failed: {str(e)}")
 
 def process_audio(audio_bytes):
     """Process audio file and extract features"""
     try:
-        # Load audio using soundfile instead of librosa
+        # Load audio using soundfile
         with io.BytesIO(audio_bytes) as audio_io:
             y, sr = sf.read(audio_io)
             
@@ -65,12 +75,15 @@ def process_audio(audio_bytes):
         if len(y) == 0:
             raise ValueError("No audio data found")
         
+        # Apply bandpass filter
+        y_filtered = apply_bandpass_filter(y, sr)
+        
         # Calculate frame parameters
         frame_length = int(sr * 0.1)  # 100ms frames
         hop_length = int(frame_length / 2)
         
-        # Calculate RMS using our custom function
-        rms = calculate_rms(y, frame_length, hop_length)
+        # Calculate RMS
+        rms = calculate_rms(y_filtered, frame_length, hop_length)
         
         # Ensure we have RMS values
         if len(rms) == 0:
@@ -108,6 +121,7 @@ def calculate_parameters(time, flow_rate):
         voided_volume = float(np.trapz(flow_rate, time))
         time_to_max = float(time[np.argmax(flow_rate)])
         
+        # Calculate flow at 2 seconds
         idx_2s = np.where(time >= 2.0)[0]
         flow_at_2s = float(flow_rate[idx_2s[0]]) if len(idx_2s) > 0 else 0.0
         acceleration = flow_at_2s / 2.0 if flow_at_2s > 0 else 0.0
@@ -126,18 +140,27 @@ def calculate_parameters(time, flow_rate):
 
 @app.post("/predict/", response_model=PredictionResponse)
 async def predict(file: UploadFile = File(...)):
+    """Handle audio file upload and generate predictions"""
     try:
+        # Validate file
+        if not file:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+        
+        # Read file content
         contents = await file.read()
         if not contents:
             raise HTTPException(status_code=400, detail="Empty file")
         
+        # Process audio and get flow rate
         flow_rate, time = process_audio(contents)
         
         if len(flow_rate) == 0 or len(time) == 0:
             raise HTTPException(status_code=500, detail="No data generated from audio processing")
         
+        # Calculate parameters
         parameters = calculate_parameters(time, flow_rate)
         
+        # Return response
         return PredictionResponse(
             flow_rate=flow_rate.tolist(),
             parameters=parameters,
@@ -151,16 +174,43 @@ async def predict(file: UploadFile = File(...)):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "timestamp": str(np.datetime64('now'))
+    }
 
 @app.get("/model-info")
 async def model_info():
+    """Get model information"""
     return {
         "version": "1.0",
         "supported_formats": ["wav", "mp3"],
         "max_duration": "60 seconds",
-        "flow_rate_range": "0-50 ml/s"
+        "flow_rate_range": "0-50 ml/s",
+        "processing_parameters": {
+            "frame_length": "100ms",
+            "bandpass_filter": {
+                "lowcut": "20 Hz",
+                "highcut": "2000 Hz"
+            }
+        }
     }
+
+# Error handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": str(exc.detail)}
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"}
+    )
 
 if __name__ == "__main__":
     import uvicorn
