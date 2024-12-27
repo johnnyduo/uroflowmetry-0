@@ -1,12 +1,6 @@
-# combined_app.py
+# app.py
 
 import streamlit as st
-import uvicorn
-import threading
-import nest_asyncio
-from fastapi import FastAPI, UploadFile, File
-import asyncio
-from api import app as fastapi_app  # Import your existing FastAPI app
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,19 +10,8 @@ import io
 from datetime import datetime
 
 # Configuration
-API_PORT = 8000
-API_URL = f"http://localhost:{API_PORT}"
+API_URL = st.secrets["api_url"]
 
-# Initialize FastAPI in background
-def run_fastapi():
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=API_PORT)
-
-# Start FastAPI in a separate thread
-thread = threading.Thread(target=run_fastapi)
-thread.daemon = True
-thread.start()
-
-# Streamlit Interface
 def create_custom_gradient():
     """Create custom gradient colormap for the graph"""
     colors = ['#1f77b4', '#2ecc71', '#3498db', '#9b59b6']
@@ -117,11 +100,19 @@ def process_audio_file(uploaded_file):
             return None
             
     except requests.exceptions.ConnectionError:
-        st.error("Could not connect to the API. Please wait while the API starts...")
+        st.error("Could not connect to the API. Please check if the API is available.")
         return None
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
         return None
+
+def check_api_health():
+    """Check if API is available"""
+    try:
+        response = requests.get(f"{API_URL}/health", timeout=5)
+        return response.status_code == 200
+    except:
+        return False
 
 def main():
     st.set_page_config(
@@ -132,6 +123,11 @@ def main():
     
     st.title("Sound-Based Uroflowmetry Analysis")
     st.write("Upload an audio file to generate uroflowmetry graph")
+    
+    # Check API health
+    if not check_api_health():
+        st.error("⚠️ API service is not available. Please try again later.")
+        return
     
     # File uploader
     uploaded_file = st.file_uploader(
